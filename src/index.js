@@ -55,6 +55,36 @@ function sendHtml(bot, chatId, html, extra = {}) {
   return bot.telegram.sendMessage(chatId, html, { parse_mode: "HTML", disable_web_page_preview: true, ...extra });
 }
 
+function formatError(err) {
+  const base = {
+    name: err?.name,
+    message: err?.message,
+    code: err?.code,
+    stack: err?.stack
+  };
+  const cause = err?.cause;
+  if (cause && typeof cause === "object") {
+    base.cause = {
+      name: cause.name,
+      message: cause.message,
+      code: cause.code,
+      errno: cause.errno,
+      syscall: cause.syscall,
+      address: cause.address,
+      port: cause.port,
+      stack: cause.stack
+    };
+  } else if (cause) {
+    base.cause = String(cause);
+  }
+
+  try {
+    return JSON.stringify(base);
+  } catch {
+    return String(err?.message || err);
+  }
+}
+
 function getTransactionId(tx) {
   if (!tx || typeof tx !== "object") return null;
   if (typeof tx.id === "string" && tx.id) return tx.id;
@@ -188,8 +218,7 @@ async function main() {
       { command: "menu", description: "📋 Hiện menu" }
     ]);
   } catch (err) {
-    const msg = err && err.message ? err.message : String(err);
-    console.error(`[telegram] setMyCommands failed: ${msg}`);
+    console.error(`[telegram] setMyCommands failed: ${formatError(err)}`);
   }
 
   async function ensureChat(ctx) {
@@ -609,9 +638,7 @@ async function main() {
         await bot.launch();
         return true;
       } catch (err) {
-        const msg = err && err.message ? err.message : String(err);
-        const causeMsg = err && err.cause && err.cause.message ? err.cause.message : err && err.cause ? String(err.cause) : "";
-        console.error(`[telegram] launch failed: ${msg}${causeMsg ? ` | cause: ${causeMsg}` : ""}`);
+        console.error(`[telegram] launch failed: ${formatError(err)}`);
         await sleep(delayMs);
         delayMs = Math.min(delayMs * 2, 60_000);
       }
@@ -628,7 +655,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  const msg = err && err.message ? err.message : String(err);
-  console.error(msg);
+  console.error(formatError(err));
   process.exitCode = 1;
 });
