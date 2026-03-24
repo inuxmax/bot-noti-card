@@ -178,14 +178,19 @@ async function main() {
     await writeState(state);
   }
 
-  await bot.telegram.setMyCommands([
-    { command: "status", description: "💼 Xem số dư" },
-    { command: "cards", description: "💳 Xem danh sách thẻ" },
-    { command: "transactions", description: "🧾 Xem 5 giao dịch gần nhất" },
-    { command: "history", description: "📥 Xem lịch sử nạp tiền" },
-    { command: "deposit_qr", description: "🔳 Hiện QR nạp tiền" },
-    { command: "menu", description: "📋 Hiện menu" }
-  ]);
+  try {
+    await bot.telegram.setMyCommands([
+      { command: "status", description: "💼 Xem số dư" },
+      { command: "cards", description: "💳 Xem danh sách thẻ" },
+      { command: "transactions", description: "🧾 Xem 5 giao dịch gần nhất" },
+      { command: "history", description: "📥 Xem lịch sử nạp tiền" },
+      { command: "deposit_qr", description: "🔳 Hiện QR nạp tiền" },
+      { command: "menu", description: "📋 Hiện menu" }
+    ]);
+  } catch (err) {
+    const msg = err && err.message ? err.message : String(err);
+    console.error(`[telegram] setMyCommands failed: ${msg}`);
+  }
 
   async function ensureChat(ctx) {
     if (ctx?.chat?.id) {
