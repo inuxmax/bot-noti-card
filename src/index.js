@@ -93,7 +93,17 @@ function createTelegramAgent() {
   return new https.Agent({
     keepAlive: true,
     lookup: (hostname, options, cb) => {
-      dns.lookup(hostname, { family: 4, all: false }, cb);
+      const mergedOptions =
+        options && typeof options === "object" ? { ...options, family: 4, all: false } : { family: 4, all: false };
+      dns.lookup(hostname, mergedOptions, (err, address) => {
+        if (err) return cb(err);
+        if (!address) {
+          const e = new Error("DNS lookup returned empty address");
+          e.code = "ENOTFOUND";
+          return cb(e);
+        }
+        return cb(null, address, 4);
+      });
     }
   });
 }
