@@ -584,15 +584,47 @@ async function main() {
     }
   }
 
-  await bot.launch();
+  let stopping = false;
+  const stopAll = (signal) => {
+    stopping = true;
+    try {
+      bot.stop(signal);
+    } catch {}
+    try {
+      webhookServer?.close();
+    } catch {}
+  };
+
+  process.once("SIGINT", () => stopAll("SIGINT"));
+  process.once("SIGTERM", () => stopAll("SIGTERM"));
+
+  async function sleep(ms) {
+    await new Promise((r) => setTimeout(r, ms));
+  }
+
+  async function launchWithRetry() {
+    let delayMs = 2_000;
+    while (!stopping) {
+      try {
+        await bot.launch();
+        return true;
+      } catch (err) {
+        const msg = err && err.message ? err.message : String(err);
+        const causeMsg = err && err.cause && err.cause.message ? err.cause.message : err && err.cause ? String(err.cause) : "";
+        console.error(`[telegram] launch failed: ${msg}${causeMsg ? ` | cause: ${causeMsg}` : ""}`);
+        await sleep(delayMs);
+        delayMs = Math.min(delayMs * 2, 60_000);
+      }
+    }
+    return false;
+  }
+
+  const launched = await launchWithRetry();
+  if (!launched) return;
+
   await pollOnce();
   const timer = setInterval(pollOnce, pollIntervalMs);
   timer.unref?.();
-
-  process.once("SIGINT", () => bot.stop("SIGINT"));
-  process.once("SIGTERM", () => bot.stop("SIGTERM"));
-  process.once("SIGINT", () => webhookServer?.close());
-  process.once("SIGTERM", () => webhookServer?.close());
 }
 
 main().catch((err) => {
