@@ -227,9 +227,11 @@ async function main() {
   }
 
   const enablePolling = (() => {
-    const raw = (process.env.TELEGRAM_ENABLE_POLLING || "").trim();
-    if (raw) return raw === "1";
-    return !state.chatId;
+    const raw = (process.env.TELEGRAM_ENABLE_POLLING || "").trim().toLowerCase();
+    if (!raw) return true;
+    if (raw === "1" || raw === "true" || raw === "yes" || raw === "on") return true;
+    if (raw === "0" || raw === "false" || raw === "no" || raw === "off") return false;
+    return true;
   })();
 
   try {
@@ -623,6 +625,14 @@ async function main() {
         await bot.launch();
         return true;
       } catch (err) {
+        const isPollingConflict =
+          String(err?.code || "") === "409" ||
+          String(err?.message || "").toLowerCase().includes("terminated by other getupdates request") ||
+          String(err?.message || "").toLowerCase().includes("409: conflict");
+        if (isPollingConflict) {
+          console.error(`[telegram] polling disabled due to conflict: ${formatError(err)}`);
+          return false;
+        }
         console.error(`[telegram] launch failed: ${formatError(err)}`);
         await sleep(delayMs);
         delayMs = Math.min(delayMs * 2, 60_000);
@@ -632,8 +642,7 @@ async function main() {
   }
 
   if (enablePolling) {
-    const launched = await launchWithRetry();
-    if (!launched) return;
+    await launchWithRetry();
   }
 
   await pollOnce();
