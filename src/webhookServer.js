@@ -22,8 +22,11 @@ function readRequestBody(req, { limitBytes = 1_000_000 } = {}) {
 function verifyWebhookSignature(payloadBuffer, signatureHeader, secret) {
   if (!secret) return true;
   if (!signatureHeader) return false;
+  const raw = String(signatureHeader).trim();
+  if (!raw) return false;
+  const normalized = raw.toLowerCase().startsWith("sha256=") ? `sha256=${raw.slice(7)}` : raw.length === 64 ? `sha256=${raw}` : raw;
   const expectedSignature = `sha256=${crypto.createHmac("sha256", secret).update(payloadBuffer).digest("hex")}`;
-  const a = Buffer.from(signatureHeader);
+  const a = Buffer.from(normalized);
   const b = Buffer.from(expectedSignature);
   if (a.length !== b.length) return false;
   return crypto.timingSafeEqual(a, b);
