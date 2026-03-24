@@ -1,11 +1,11 @@
 require("dotenv").config();
 
 const dns = require("node:dns");
+const https = require("node:https");
 const { Telegraf, Markup } = require("telegraf");
-const QRCode = require("qrcode");
 
 const { readState, writeState, resolveStatePath } = require("./stateStore");
-const { getBalance, listCards, listTransactions, listCryptoDeposits } = require("./megaoneApi");
+const { getBalance, listCards, listTransactions } = require("./megaoneApi");
 const { formatBalance, formatCards, formatTransaction, formatTransactionLine, pickTransactionTime } = require("./formatters");
 const { startWebhookServer } = require("./webhookServer");
 
@@ -52,8 +52,74 @@ function replyHtml(ctx, html, extra = {}) {
   return ctx.reply(html, { parse_mode: "HTML", disable_web_page_preview: true, ...extra });
 }
 
-function sendHtml(bot, chatId, html, extra = {}) {
-  return bot.telegram.sendMessage(chatId, html, { parse_mode: "HTML", disable_web_page_preview: true, ...extra });
+function telegramApiCall(method, payload) {
+  const token = process.env.TELEGRAM_BOT_TOKEN?.trim();
+  if (!token) {
+    const err = new Error("Missing TELEGRAM_BOT_TOKEN env var");
+    err.code = "CONFIG";
+    throw err;
+  }
+
+  const body = Buffer.from(JSON.stringify(payload || {}));
+  const options = {
+    method: "POST",
+    hostname: "api.telegram.org",
+    port: 443,
+    path: `/bot${token}/${method}`,
+    family: 4,
+    headers: {
+      "content-type": "application/json",
+      "content-length": String(body.length)
+    }
+  };
+
+  return new Promise((resolve, reject) => {
+    const req = https.request(options, (res) => {
+      const chunks = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => {
+        const raw = Buffer.concat(chunks).toString("utf8");
+        let parsed;
+        try {
+          parsed = JSON.parse(raw);
+        } catch (err) {
+          const e = new Error(`Telegram API non-JSON response (${res.statusCode}): ${raw.slice(0, 200)}`);
+          e.code = "TELEGRAM_BAD_RESPONSE";
+          e.status = res.statusCode;
+          return reject(e);
+        }
+
+        if (!parsed?.ok) {
+          const e = new Error(parsed?.description || `Telegram API error (${res.statusCode})`);
+          e.code = "TELEGRAM_API";
+          e.status = parsed?.error_code || res.statusCode;
+          e.body = parsed;
+          return reject(e);
+        }
+
+        resolve(parsed.result);
+      });
+    });
+
+    req.on("error", reject);
+    req.setTimeout(15_000, () => {
+      const e = new Error("Telegram API request timeout");
+      e.code = "ETIMEDOUT";
+      req.destroy(e);
+    });
+    req.write(body);
+    req.end();
+  });
+}
+
+function sendHtml(_bot, chatId, html, extra = {}) {
+  return telegramApiCall("sendMessage", {
+    chat_id: chatId,
+    text: html,
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+    ...extra
+  });
 }
 
 function formatError(err) {
@@ -139,64 +205,6 @@ function isTopupTransaction(tx, keywords) {
   return false;
 }
 
-function pickFirstArray(value) {
-  if (Array.isArray(value)) return value;
-  return null;
-}
-
-function pickDepositsArray(resp) {
-  if (!resp || typeof resp !== "object") return [];
-  return (
-    pickFirstArray(resp.data) ||
-    pickFirstArray(resp.items) ||
-    pickFirstArray(resp.deposits) ||
-    pickFirstArray(resp.result) ||
-    []
-  );
-}
-
-function pickQrImageUrl(obj) {
-  const candidates = [
-    obj?.qrUrl,
-    obj?.qrURL,
-    obj?.qrCodeUrl,
-    obj?.qrCodeURL,
-    obj?.qr_image_url,
-    obj?.qrImageUrl,
-    obj?.qrImage
-  ].filter((x) => typeof x === "string" && x.startsWith("http"));
-  return candidates[0] || null;
-}
-
-function pickQrPayload(obj) {
-  const candidates = [
-    obj?.qr,
-    obj?.qrCode,
-    obj?.qrPayload,
-    obj?.qrData,
-    obj?.address,
-    obj?.depositAddress,
-    obj?.walletAddress,
-    obj?.toAddress,
-    obj?.paymentAddress,
-    obj?.paymentUri,
-    obj?.paymentURI,
-    obj?.uri
-  ].filter((x) => typeof x === "string" && x.trim().length > 0);
-  return candidates[0] || null;
-}
-
-function pickDepositMeta(obj) {
-  if (!obj || typeof obj !== "object") return {};
-  return {
-    currency: obj.currency || obj.coin || obj.asset || obj.symbol || "",
-    network: obj.network || obj.chain || obj.blockchain || "",
-    amount: obj.amount || obj.amountValue || obj.value || "",
-    status: obj.status || "",
-    createdAt: obj.createdAt || obj.created_at || obj.time || obj.timestamp || ""
-  };
-}
-
 function normalizeState(state) {
   const sentTransactionIds = Array.isArray(state.sentTransactionIds) ? state.sentTransactionIds : [];
   const transactionStatusById =
@@ -218,15 +226,23 @@ async function main() {
     await writeState(state);
   }
 
+  const enablePolling = (() => {
+    const raw = (process.env.TELEGRAM_ENABLE_POLLING || "").trim();
+    if (raw) return raw === "1";
+    return !state.chatId;
+  })();
+
   try {
-    await bot.telegram.setMyCommands([
-      { command: "status", description: "💼 Xem số dư" },
-      { command: "cards", description: "💳 Xem danh sách thẻ" },
-      { command: "transactions", description: "🧾 Xem 5 giao dịch gần nhất" },
-      { command: "history", description: "📥 Xem lịch sử nạp tiền" },
-      { command: "deposit_qr", description: "🔳 Hiện QR nạp tiền" },
-      { command: "menu", description: "📋 Hiện menu" }
-    ]);
+    await telegramApiCall("setMyCommands", {
+      commands: [
+        { command: "status", description: "💼 Xem số dư" },
+        { command: "cards", description: "💳 Xem danh sách thẻ" },
+        { command: "transactions", description: "🧾 Xem 5 giao dịch gần nhất" },
+        { command: "history", description: "📥 Xem lịch sử nạp tiền" },
+        { command: "deposit_qr", description: "🔳 Hiện QR nạp tiền" },
+        { command: "menu", description: "📋 Hiện menu" }
+      ]
+    });
   } catch (err) {
     console.error(`[telegram] setMyCommands failed: ${formatError(err)}`);
   }
@@ -330,56 +346,15 @@ async function main() {
 
   async function runDepositQr(ctx) {
     await ensureChat(ctx);
-    const timezone = (process.env.CUSTOMER_TIMEZONE || "Asia/Saigon").trim();
-    const limit = 10;
-    const page = 1;
-
-    let resp;
-    try {
-      resp = await listCryptoDeposits({ page, limit, timezone });
-    } catch (err) {
-      const msg = err && err.message ? err.message : String(err);
-      await replyHtml(ctx, `⚠️ Không gọi được API nạp tiền: ${msg}`, mainMenuMarkup());
+    const imageUrl = (process.env.DEPOSIT_QR_IMAGE_URL || "https://sf-static.upanhlaylink.com/img/image_20260325b1d37994c6ac8a3402c1c24233f1dfb7.jpg").trim();
+    if (!imageUrl || !imageUrl.startsWith("http")) {
+      await replyHtml(ctx, "⚠️ Thiếu DEPOSIT_QR_IMAGE_URL hoặc link không hợp lệ.", mainMenuMarkup());
       return;
     }
 
-    const deposits = pickDepositsArray(resp);
-    if (!Array.isArray(deposits) || deposits.length === 0) {
-      await replyHtml(ctx, "ℹ️ Không có lịch sử nạp tiền.", mainMenuMarkup());
-      return;
-    }
-
-    const first = deposits[0];
-    const qrUrl = pickQrImageUrl(first);
-    const qrPayload = pickQrPayload(first);
-    const meta = pickDepositMeta(first);
-
-    const captionParts = [
-      "🔳 QR nạp tiền",
-      meta.currency ? `🪙 Coin: ${meta.currency}` : null,
-      meta.network ? `🌐 Network: ${meta.network}` : null,
-      meta.amount ? `💰 Amount: ${meta.amount}` : null,
-      meta.status ? `📌 Status: ${meta.status}` : null,
-      meta.createdAt ? `🕒 Time: ${meta.createdAt}` : null,
-      qrPayload && !qrUrl ? `Data: ${qrPayload}` : null
-    ].filter(Boolean);
-    const caption = captionParts.join("\n");
-
-    if (qrUrl) {
-      await ctx.replyWithPhoto(qrUrl, { caption }).catch(async () => {
-        await ctx.reply(caption, mainMenuMarkup());
-      });
-      return;
-    }
-
-    if (!qrPayload) {
-      await replyHtml(ctx, "⚠️ Không tìm thấy QR/address trong dữ liệu nạp tiền trả về.", mainMenuMarkup());
-      return;
-    }
-
-    const png = await QRCode.toBuffer(qrPayload, { type: "png", errorCorrectionLevel: "M", margin: 1, scale: 6 });
-    await ctx.replyWithPhoto({ source: png }, { caption }).catch(async () => {
-      await ctx.reply(caption, mainMenuMarkup());
+    const caption = "🔳 QR nạp tiền";
+    await ctx.replyWithPhoto(imageUrl, { caption }).catch(async () => {
+      await replyHtml(ctx, `🔳 QR nạp tiền\n${imageUrl}`, mainMenuMarkup());
     });
   }
 
@@ -656,8 +631,10 @@ async function main() {
     return false;
   }
 
-  const launched = await launchWithRetry();
-  if (!launched) return;
+  if (enablePolling) {
+    const launched = await launchWithRetry();
+    if (!launched) return;
+  }
 
   await pollOnce();
   const timer = setInterval(pollOnce, pollIntervalMs);
