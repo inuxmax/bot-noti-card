@@ -1,7 +1,6 @@
 require("dotenv").config();
 
 const dns = require("node:dns");
-const https = require("node:https");
 const { Telegraf, Markup } = require("telegraf");
 const QRCode = require("qrcode");
 
@@ -87,25 +86,12 @@ function formatError(err) {
   }
 }
 
-function createTelegramAgent() {
+function configureDns() {
   const raw = (process.env.TELEGRAM_FORCE_IPV4 || "1").trim();
-  if (raw === "0") return undefined;
-  return new https.Agent({
-    keepAlive: true,
-    lookup: (hostname, options, cb) => {
-      const mergedOptions =
-        options && typeof options === "object" ? { ...options, family: 4, all: false } : { family: 4, all: false };
-      dns.lookup(hostname, mergedOptions, (err, address) => {
-        if (err) return cb(err);
-        if (!address) {
-          const e = new Error("DNS lookup returned empty address");
-          e.code = "ENOTFOUND";
-          return cb(e);
-        }
-        return cb(null, address, 4);
-      });
-    }
-  });
+  if (raw === "0") return;
+  try {
+    dns.setDefaultResultOrder?.("ipv4first");
+  } catch {}
 }
 
 function getTransactionId(tx) {
@@ -221,9 +207,9 @@ function normalizeState(state) {
 }
 
 async function main() {
+  configureDns();
   const token = getRequiredEnv("TELEGRAM_BOT_TOKEN");
-  const agent = createTelegramAgent();
-  const bot = new Telegraf(token, agent ? { telegram: { agent } } : undefined);
+  const bot = new Telegraf(token);
 
   let state = normalizeState(await readState());
   const envChatId = parseChatId(process.env.TELEGRAM_CHAT_ID?.trim());
