@@ -5,8 +5,8 @@ const https = require("node:https");
 const { Telegraf, Markup } = require("telegraf");
 
 const { readState, writeState, resolveStatePath } = require("./stateStore");
-const { getBalance, listCards, listTransactions } = require("./megaoneApi");
-const { formatBalance, formatCards, formatTransaction, formatTransactionLine, pickTransactionTime } = require("./formatters");
+const { getBalance, listCards, listTransactions, listCryptoDeposits } = require("./megaoneApi");
+const { formatBalance, formatCards, formatTransaction, formatWebhookTransaction, formatTransactionLine, pickTransactionTime } = require("./formatters");
 const { startWebhookServer } = require("./webhookServer");
 
 const MENU = {
@@ -160,6 +160,15 @@ function configureDns() {
   } catch {}
 }
 
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
 function getTransactionId(tx) {
   if (!tx || typeof tx !== "object") return null;
   if (typeof tx.id === "string" && tx.id) return tx.id;
@@ -197,12 +206,67 @@ function parseKeywordsCsv(raw) {
 }
 
 function isTopupTransaction(tx, keywords) {
+  const amount = (() => {
+    if (!tx || typeof tx !== "object") return null;
+    if (typeof tx.amount === "number") return tx.amount;
+    if (typeof tx.amountCents === "number") return tx.amountCents / 100;
+    return null;
+  })();
+  if (typeof amount === "number" && Number.isFinite(amount) && amount > 0) return true;
+
   const text = getTransactionSearchText(tx);
   if (!text) return false;
   for (const kw of keywords) {
     if (text.includes(kw)) return true;
   }
   return false;
+}
+
+function pickArray(value) {
+  return Array.isArray(value) ? value : null;
+}
+
+function pickDepositRows(resp) {
+  if (!resp || typeof resp !== "object") return [];
+  return (
+    pickArray(resp.data) ||
+    pickArray(resp.items) ||
+    pickArray(resp.deposits) ||
+    pickArray(resp.result) ||
+    []
+  );
+}
+
+function pickDepositPagination(resp) {
+  if (!resp || typeof resp !== "object") return {};
+  const pagination = resp.pagination || resp.meta?.pagination || resp.meta || {};
+  if (!pagination || typeof pagination !== "object") return {};
+  return pagination;
+}
+
+function pickDepositTime(d) {
+  return d?.date || d?.createdAt || d?.created_at || d?.timestamp || d?.time || null;
+}
+
+function formatDepositLine(d) {
+  const time = pickDepositTime(d);
+  const timeText = time ? escapeHtml(String(time)) : "unknown time";
+  const chain = d?.chain || d?.network || d?.blockchain || "";
+  const amount = d?.amount ?? d?.amountUsdt ?? d?.amountUSDT ?? d?.amount_value ?? "";
+  const credited = d?.credited ?? d?.creditedUsd ?? d?.creditedUSD ?? d?.creditedValue ?? "";
+  const status = d?.status || "";
+  const txHash = d?.txHash || d?.hash || d?.tx_hash || "";
+
+  const parts = [
+    `🗓️ ${timeText}`,
+    chain ? `🌐 ${escapeHtml(String(chain))}` : null,
+    amount !== "" ? `💰 ${escapeHtml(String(amount))}` : null,
+    credited !== "" ? `💵 ${escapeHtml(String(credited))}` : null,
+    status ? `✅ ${escapeHtml(String(status))}` : null,
+    txHash ? `🔗 ${escapeHtml(String(txHash))}` : null
+  ].filter(Boolean);
+
+  return parts.join(" | ");
 }
 
 function normalizeState(state) {
@@ -364,7 +428,7 @@ async function main() {
     const raw = process.env.TOPUP_KEYWORDS?.trim();
     const parsed = parseKeywordsCsv(raw);
     if (parsed.length > 0) return parsed;
-    return ["top up", "topup", "deposit", "funding", "add funds", "recharge", "nạp", "nap"];
+    return ["top up", "topup", "deposit", "funding", "add funds", "recharge", "nạp", "nap", "transfer", "primary account", "credit", "load"];
   })();
 
   function historyInlineMarkup({ page, totalPages, limit }) {
@@ -377,6 +441,51 @@ async function main() {
 
   async function renderHistory(ctx, { page = 1, limit = 20, editMessage = false } = {}) {
     await ensureChat(ctx);
+
+    const timezone = (process.env.CUSTOMER_TIMEZONE || "Asia/Saigon").trim();
+    const depositStatusFilter = (process.env.DEPOSIT_STATUS || "completed").trim().toLowerCase();
+
+    try {
+      const resp = await listCryptoDeposits({ page, limit, timezone });
+      const rows = pickDepositRows(resp);
+      const pagination = pickDepositPagination(resp);
+      const totalPages = typeof pagination.totalPages === "number" ? pagination.totalPages : page;
+
+      const filtered =
+        depositStatusFilter === "all"
+          ? rows
+          : rows.filter((d) => String(d?.status || "").trim().toLowerCase() === depositStatusFilter);
+
+      if (filtered.length === 0) {
+        const text = "Không có lịch sử nạp tiền.";
+        if (editMessage) {
+          await ctx.editMessageText(text).catch(() => {});
+        } else {
+          await replyHtml(ctx, text, mainMenuMarkup());
+        }
+        return;
+      }
+
+      const header = `<b>📥 Lịch sử nạp tiền</b> <i>(Trang ${page}/${totalPages})</i>`;
+      const startIndex = (page - 1) * limit;
+      const body = filtered.map((d, i) => `${startIndex + i + 1}. ${formatDepositLine(d)}`).join("\n");
+      const text = `${header}\n\n${body}`;
+      const inline = historyInlineMarkup({ page, totalPages, limit });
+
+      if (editMessage) {
+        await ctx
+          .editMessageText(text, { parse_mode: "HTML", disable_web_page_preview: true, ...(inline ? inline : {}) })
+          .catch(() => {});
+      } else {
+        await replyHtml(ctx, text, inline ? inline : undefined);
+      }
+      return;
+    } catch (err) {
+      const msg = err && err.message ? err.message : String(err);
+      await replyHtml(ctx, `⚠️ Không gọi được lịch sử nạp tiền: ${escapeHtml(msg)}`, mainMenuMarkup());
+      return;
+    }
+
     const desired = limit;
     const maxPagesToScan = 5;
     let currentPage = page;
@@ -399,7 +508,8 @@ async function main() {
     }
 
     if (collected.length === 0) {
-      const text = "Không có giao dịch.";
+      const text =
+        "Không tìm thấy giao dịch nạp tiền.\n\nGợi ý: Lịch sử nạp tiền hiện lọc theo giao dịch +amount hoặc theo từ khoá TOPUP_KEYWORDS.";
       if (editMessage) {
         await ctx.editMessageText(text).catch(() => {});
       } else {

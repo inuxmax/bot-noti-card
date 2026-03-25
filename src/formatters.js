@@ -44,6 +44,20 @@ function pickTransactionTime(tx) {
   return tx?.createdAt || tx?.transactionAt || tx?.authorizedAt || null;
 }
 
+function formatWebhookTransaction(tx, { currency } = {}) {
+  const amount = tx?.amount ?? (typeof tx?.amountCents === "number" ? tx.amountCents / 100 : undefined);
+  const txCurrency = tx?.currency || currency;
+  const status = tx?.detailedStatus || tx?.status || "unknown";
+  const merchant = tx?.merchantDescription || tx?.merchant || "Unknown";
+  const cardName = tx?.cardNickname || "Card";
+  const last4 = tx?.cardLast4 ? String(tx.cardLast4) : "";
+
+  const firstLine = `${formatMoney(amount, txCurrency)} at ${merchant} [${cardName}${last4 ? ` --${last4}` : ""}]`;
+  const lines = [escapeHtml(firstLine)];
+  if (isPendingStatus(status)) lines.push(escapeHtml(`[${status}]`));
+  return lines.join("\n");
+}
+
 function formatTransactionLine(tx, { currency } = {}) {
   const amount = tx?.amount ?? (typeof tx?.amountCents === "number" ? tx.amountCents / 100 : undefined);
   const txCurrency = tx?.currency || currency;
@@ -66,11 +80,18 @@ function formatTransaction(tx, { balance, currency } = {}) {
   const txCurrency = tx?.currency || currency;
   const status = tx?.detailedStatus || tx?.status || "unknown";
   const merchant = tx?.merchant || "Unknown merchant";
-  const description = tx?.description || tx?.merchantDescription || "";
+  const description = tx?.description || "";
+  const merchantDescription = tx?.merchantDescription || "";
   const cardName = tx?.cardNickname || "Card";
   const cardLast4 = tx?.cardLast4 ? `•••• ${tx.cardLast4}` : "";
   const when = pickTransactionTime(tx);
   const whenText = when ? new Date(when).toISOString().replace("T", " ").replace("Z", " UTC") : "unknown time";
+
+  const norm = (s) => String(s || "").trim().toLowerCase();
+  const showMerchantDescription =
+    merchantDescription &&
+    norm(merchantDescription) !== norm(merchant) &&
+    (!description || norm(merchantDescription) !== norm(description));
 
   const pending = isPendingStatus(status);
   const lines = [
@@ -78,6 +99,7 @@ function formatTransaction(tx, { balance, currency } = {}) {
     `<b>💳 Thẻ:</b> ${escapeHtml(cardName)}${cardLast4 ? ` ${escapeHtml(cardLast4)}` : ""}`,
     `<b>🏪 Merchant:</b> ${escapeHtml(merchant)}`,
     description ? `<b>📝 Mô tả:</b> ${escapeHtml(description)}` : null,
+    showMerchantDescription ? `<b>🧾 Nội dung:</b> <code>${escapeHtml(merchantDescription)}</code>` : null,
     `<b>🗓️ Thời gian:</b> ${escapeHtml(whenText)}`,
     balance !== undefined && balance !== null ? `<b>💼 Số dư:</b> <code>${escapeHtml(formatMoney(balance, currency || txCurrency))}</code>` : null
   ].filter(Boolean);
@@ -126,6 +148,7 @@ function formatCards(cardsResp) {
 
 module.exports = {
   formatTransaction,
+  formatWebhookTransaction,
   formatTransactionLine,
   formatBalance,
   formatCards,
